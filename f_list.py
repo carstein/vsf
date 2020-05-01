@@ -29,7 +29,6 @@ def main():
     if func.symbol.type == bn.SymbolType.ImportedFunctionSymbol: continue
     if func.name in skip_func: continue
     
-    #print('0x{:x} -> {}'.format(func.start - base, func.name))
     print('0x{:x}'.format(func.start - base))
 
 if __name__ == '__main__':
