@@ -9,6 +9,7 @@ import os.path
 import random
 import sys
 import signal
+import time
 
 from ptrace import debugger
 
@@ -27,8 +28,11 @@ MAGIC_VALS = [
   [0xFF, 0xFF, 0xFF, 0x7F], # 0x7FFFFFFF
 ]
 
-# Gather unique crashes
+# List of unique crashes
 crashes = {}
+
+# list of traces
+trace = {}
 
 config = {
   'file': 'mutated.jpg', # name of the target file
@@ -39,44 +43,67 @@ config = {
   'seed': None,       # Seed for PRNG
 }
 
+
+def load_map(filename):
+  with open(filename, 'r') as fh:
+    for line in fh.readlines():
+      pass
+
 def save_crashes():
-  print("Saving crashes...")
+  print('Saving crashes...')
   crash_dir = config['crashes_dir']
   
   if not os.path.exists(crash_dir):
     os.mkdir(crash_dir)
 
   for ip, data in crashes.items():
-    filename = "crash.{:x}.jpg".format(ip)
-    with open(os.path.join(crash_dir, filename), "wb+") as fh:
+    filename = 'crash.{:x}.jpg'.format(ip)
+    with open(os.path.join(crash_dir, filename), 'wb+') as fh:
       fh.write(data)
   
-  print("{} unique crashes.".format(len(crashes)))
+  print('{} unique crashes.'.format(len(crashes)))
 
-def absolute_address(ip, mappings):
-  for mapping in mappings:
-    if ip in mapping:
-      return ip-mapping.start
+def get_base(vmmap):
+  for m in vmmap:
+    if 'x' in m.permissions and m.pathname.endswith(os.path.basename(config['target'])):
+      return m.start
 
-def execute_fuzz(dbg, data, counter):
+def execute_fuzz(dbg, data, counter, bpmap):
+  trace = []
   cmd = [config['target'], config['file']]
   pid = debugger.child.createChild(cmd, no_stdout=True, env=None)
   proc = dbg.addProcess(pid, True)
-  proc.cont()
+  base = get_base(proc.readMappings())
 
-  event = dbg.waitProcessEvent()
+  # Inser breakpoints for tracing
+  if bpmap:
+    for p in bpmap:
+      proc.createBreakpoint(base + p)
   
-  if event.signum == signal.SIGSEGV:
-    crash_ip = absolute_address(proc.getInstrPointer(), proc.readMappings())
-    if crash_ip not in crashes:
-      crashes[crash_ip] = data
-    proc.detach()
-  else:
-    proc.detach()
+  while True:
+    proc.cont()
+    event = dbg.waitProcessEvent()
+    
+    if event.signum == signal.SIGSEGV:
+      crash_ip = proc.getInstrPointer() - base - 1 # getInstrPointer() always returns instruction + 1
+      if crash_ip not in crashes:
+        crashes[crash_ip] = data
+      proc.detach()
+      break
+    elif event.signum == signal.SIGTRAP:
+      trace.append(proc.getInstrPointer() - base - 1)
+    elif isinstance(event, debugger.ProcessExit):
+      proc.detach()
+      break
+    else:
+      print(event)
+  
+  # Program terminated
+  return trace
 
 def create_new(data):
-  path = "mutated.jpg"
-  with open(path, "wb+") as fh:
+  path = 'mutated.jpg'
+  with open(path, 'wb+') as fh:
     fh.write(data)
 
 def magic(data, idx):
@@ -110,20 +137,31 @@ def get_corpus(path):
   corpus = []
 
   if os.path.isfile(path):
-    with open(path, "rb") as fh:
+    with open(path, 'rb') as fh:
       corpus.append(bytearray(fh.read()))
   elif os.path.isdir(path):
     for file in os.listdir(path):
       if os.path.isfile(file):
-        with open(file, "rb") as fh:
+        with open(file, 'rb') as fh:
           corpus.append(bytearray(fh.read()))
 
   return corpus
 
+def get_bpmap(path):
+  bpmap = []
+
+  if path and os.path.isfile(path):
+    with open(path, "r") as fh:
+      bpmap = list(map(lambda x: int(x.strip(), 16), fh.readlines()))
+  else:
+    print("No breakpoint map; trace won't be generated")
+
+  return bpmap
 
 def create_config(args):
   config['target'] = args.target
   config['corpus'] = args.corpus
+  config['bpmap'] = args.bpmap
   
   if args.rounds:
     config['rounds'] = int(args.rounds)
@@ -132,7 +170,7 @@ def create_config(args):
     config['seed'] = base64.b64decode(seed)
 
 def finish(sig, frame):
-  print("Finishing fuzz job.")
+  print('Finishing fuzz job.')
   # Add function to dump all crashes
   save_crashes()
   sys.exit(1)
@@ -140,16 +178,19 @@ def finish(sig, frame):
 def main():
   signal.signal(signal.SIGINT, finish)
   parser = argparse.ArgumentParser()
-  parser.add_argument("-t", "--target", help = "target program", 
+  parser.add_argument('-t', '--target', help = 'target program', 
       required=True)
-  parser.add_argument("-c", "--corpus", help = "corpus of files",
-      required=True)
-  parser.add_argument("-r", "--rounds", help = "number of rounds", 
+  parser.add_argument('-b', '--bpmap', help = 'map of breakpoints for trace',
       required=False)
-  parser.add_argument("-s", "--seed", help = "seed for PRNG", 
+  parser.add_argument('-c', '--corpus', help = 'corpus of files',
+      required=True)
+  parser.add_argument('-r', '--rounds', help = 'number of rounds', 
+      required=False)
+  parser.add_argument('-s', '--seed', help = 'seed for PRNG', 
       required=False)
   create_config(parser.parse_args())
 
+  bp_map = get_bpmap(config['bpmap'])
   corpus = get_corpus(config['corpus'])
   dbg = debugger.PtraceDebugger()
 
@@ -160,25 +201,25 @@ def main():
     initial_seed = os.urandom(24)
     
   random.seed(initial_seed)
-  print("Starting new fuzzing run with seed {}".format(base64.b64encode(initial_seed).decode('utf-8')))
-
+  print('Starting new fuzzing run with seed {}'.format(base64.b64encode(initial_seed).decode('utf-8')))
+  
   # Fuzz loop
   for file in corpus:
     counter = 0
+    start_time = time.time()
     while counter < config['rounds']:
       data = file[:]
       mutated_data = mutate(data)
       create_new(mutated_data)
-      execute_fuzz(dbg, mutated_data, counter)
-
-      if counter % 100 == 0:
-        print("Counter: {}\r".format(counter),file=sys.stderr, end='')
-      
+      t = execute_fuzz(dbg, mutated_data, counter, bp_map)
       counter += 1
+    
+    x = counter / (time.time()-start_time)
+    print('-> {:.0f} exec/sec'.format(x))
   
   #cleanup
   dbg.quit()
   save_crashes()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
   sys.exit(main())
