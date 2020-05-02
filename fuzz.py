@@ -77,7 +77,7 @@ def execute_fuzz(dbg, data, counter, bpmap):
 
   # Inser breakpoints for tracing
   if bpmap:
-    for offset in boffsetmap:
+    for offset in bpmap:
       proc.createBreakpoint(base + offset)
   
   while True:
