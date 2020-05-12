@@ -171,7 +171,6 @@ def create_config(args):
 
 def finish(sig, frame):
   print('Finishing fuzz job.')
-  # Add function to dump all crashes
   save_crashes()
   sys.exit(1)
 
