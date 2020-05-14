@@ -9,7 +9,8 @@ skip_func = ['__libc_csu_init',
              '_fini',
              '__do_global_dtors_aux',
              '_start',
-             '_init']
+             '_init',
+             'sub_1034']
 
 def main():
   parser = argparse.ArgumentParser()
@@ -28,8 +29,13 @@ def main():
     # filter out the list of functions
     if func.symbol.type == bn.SymbolType.ImportedFunctionSymbol: continue
     if func.name in skip_func: continue
-    
-    print('0x{:x}'.format(func.start - base))
+
+    #output = "{}: ".format(func.name)
+    output = ""
+    for bb in func:
+      output += "0x{:x} ".format(bb.start-base)
+      #break
+    print(output)
 
 if __name__ == '__main__':
   sys.exit(main())

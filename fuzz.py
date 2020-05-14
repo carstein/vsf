@@ -22,7 +22,7 @@ MAGIC_VALS = [
   [0xFF, 0xFF], # 0xFFFF
   [0x00, 0x00], # 0x0000
   [0xFF, 0xFF, 0xFF, 0xFF], # 0xFFFFFFFF
-  [0x00, 0x00, 0x00, 0x00], # 0x80000000
+  [0x00, 0x00, 0x00, 0x00], # 0x00000000
   [0x00, 0x00, 0x00, 0x80], # 0x80000000
   [0x00, 0x00, 0x00, 0x40], # 0x40000000
   [0xFF, 0xFF, 0xFF, 0x7F], # 0x7FFFFFFF
@@ -44,11 +44,6 @@ config = {
 }
 
 
-def load_map(filename):
-  with open(filename, 'r') as fh:
-    for line in fh.readlines():
-      pass
-
 def save_crashes():
   print('Saving crashes...')
   crash_dir = config['crashes_dir']
@@ -69,13 +64,14 @@ def get_base(vmmap):
       return m.start
 
 def execute_fuzz(dbg, data, counter, bpmap):
-  trace = []
+  trace = set()
   cmd = [config['target'], config['file']]
   pid = debugger.child.createChild(cmd, no_stdout=True, env=None)
   proc = dbg.addProcess(pid, True)
   base = get_base(proc.readMappings())
+  status = 0
 
-  # Inser breakpoints for tracing
+  # Insert breakpoints for tracing
   if bpmap:
     for offset in bpmap:
       proc.createBreakpoint(base + offset)
@@ -85,13 +81,17 @@ def execute_fuzz(dbg, data, counter, bpmap):
     event = dbg.waitProcessEvent()
     
     if event.signum == signal.SIGSEGV:
+      status = 1
       crash_ip = proc.getInstrPointer() - base - 1 # getInstrPointer() always returns instruction + 1
       if crash_ip not in crashes:
         crashes[crash_ip] = data
       proc.detach()
       break
     elif event.signum == signal.SIGTRAP:
-      trace.append(proc.getInstrPointer() - base - 1)
+      ip = proc.getInstrPointer()
+      br = proc.findBreakpoint(ip-1).desinstall()
+      proc.setInstrPointer(ip-1) # Rewind back to the correct code
+      trace.add(ip - base - 1)
     elif isinstance(event, debugger.ProcessExit):
       proc.detach()
       break
@@ -99,7 +99,7 @@ def execute_fuzz(dbg, data, counter, bpmap):
       print(event)
   
   # Program terminated
-  return trace
+  return trace, status
 
 def create_new(data):
   path = 'mutated.jpg'
@@ -152,7 +152,8 @@ def get_bpmap(path):
 
   if path and os.path.isfile(path):
     with open(path, "r") as fh:
-      bpmap = list(map(lambda x: int(x.strip(), 16), fh.readlines()))
+      for line in fh.readlines():
+        bpmap.extend(list(map(lambda x: int(x.strip(), 16), line.split())))
   else:
     print("No breakpoint map; trace won't be generated")
 
@@ -210,7 +211,8 @@ def main():
       data = file[:]
       mutated_data = mutate(data)
       create_new(mutated_data)
-      t = execute_fuzz(dbg, mutated_data, counter, bp_map)
+      t, s = execute_fuzz(dbg, mutated_data, counter, bp_map)
+      print('#{:3d} Coverage {:.2f}% {}'.format(counter, 100 * (len(t)/len(bp_map)), '*' if s == 1 else ''))
       counter += 1
     
     x = counter / (time.time()-start_time)
